@@ -1,0 +1,864 @@
+///////////////////////////////////////////////////////////////
+/////////////////// SETUP SECTION /////////////////////////////
+///////////////////////////////////////////////////////////////
+var et = ee.ImageCollection('projects/idwr-450722/assets/METRIC');
+var prism = ee.ImageCollection('projects/sat-io/open-datasets/OREGONSTATE/PRISM_800_MONTHLY');
+var id_shp = ee.FeatureCollection('projects/idwr-450722/assets/ID_shapefile');
+var geo = ee.Geometry.MultiPoint([]);
+//Set a workload tag for the project
+ee.data.setWorkloadTag('etviewerdev');
+
+//inital imagery checks and getting the scale of the input imagery
+var img = et.first();
+
+var imgScale = img.projection().nominalScale();
+
+//list of symbols as emojis for displaying
+var symbol = {rectangle: '⬛', 
+polygon: '🔶', 
+point: '📍'};
+
+var buttonStyleDict =  ui.data.ActiveDictionary({color: 'black', borderColor: '#bbbbbb grey #808080 grey', borderWidth: '1px 2px 3px 1px', borderRadius: '7px', borderStyle: 'solid', padding: '0px'});
+var sidePanelWidth = '350px';
+
+//create a panel to house all of the controls and instructions on the side of the screen
+var sidePanel = ui.Panel({widgets: [ui.Panel(),ui.Panel(),ui.Panel(),ui.Panel()],
+  style: {width: sidePanelWidth, border: '5px', borderStyle: 'solid', borderColor: 'black', 
+  position: 'bottom-left', stretch: 'vertical'}, layout: 'flow'
+});
+//clear out the root to add in the side panel on the correct side
+ui.root.clear();
+ui.root.add(sidePanel); 
+//reinitialize the map
+var Map = ui.Map();
+ui.root.add(Map);
+Map.setOptions('HYBRID');
+Map.setCenter(-113, 44.25, 8);
+Map.add(ui.Panel(null, null, {backgroundColor: '#00000000'}));
+Map.add(ui.Panel(null, null, {backgroundColor: '#00000000'}));
+Map.add(ui.Panel(null, null, {backgroundColor: '#00000000'}));
+Map.add(ui.Panel(null, null, {backgroundColor: '#00000000'}));
+Map.add(ui.Panel(null, null, {backgroundColor: '#00000000'}));
+Map.add(ui.Panel(null, null, {backgroundColor: '#00000000'}));
+//add the idaho shapefile to the map
+
+
+//Map.addLayer(id_shp.style({color:'black', fillColor: '#00000000',width: 3}), {}, 'State Boundary');
+
+
+var allET = ee.ImageCollection(et.distinct('system:footprint')).map(function(img){return img.toByte().rename('b1')}).mosaic();
+Map.addLayer(allET, {palette: ['blue'], opacity: 0.5}, 'Available ET Data (Year Dependent)', 0);
+//This is where the app started from as a tutorial
+//https://developers.google.com/earth-engine/tutorials/community/drawing-tools-region-reduction
+
+///////////////////////////////////////////////////////////////
+/////////////// CREATE DRAWING TOOLS //////////////////////////
+///////////////////////////////////////////////////////////////
+
+//initialize the drawing tools for making a geometry 
+var drawer = Map.drawingTools();
+
+//make it no shape so that shape can be cast later
+drawer.setShape(null);
+
+//if there are any layers in the drawing tools, remove them
+while (drawer.layers().length() > 0){
+  var layer = drawer.layers().get(0);
+  drawer.layers().remove(layer);
+}
+
+//create a dummy geo to cast any settings
+var dummyGeo = ui.Map.GeometryLayer({geometries: null, name: 'geo', color: '#C94F3A', shown: false});
+
+//add the dummy layer to the geometries
+drawer.layers().add(dummyGeo);
+
+//clear out the geometry, run when a drawing instance is initialized
+function clearGeo() {
+  var layers = drawer.layers();
+  layers.get(0).geometries().remove(layers.get(0).geometries().get(0));
+}
+
+//functions to draw rectangles, polygons, and points
+function drawPoly() {
+  clearGeo();
+  drawer.setShape('polygon');
+  drawer.draw();
+  doneButton.style().set(buttonStyleDict.set({color: 'black', position:'middle-left', stretch: 'vertical', width: ''}));
+  if (startYearBox.getValue() !== null){
+    doneButton.setDisabled(false);
+  }
+}
+
+////
+
+///////////////////////////////////////////////////////////////
+///////////// INITIAL PANEL AND BUTTON CREATION ///////////////
+///////////////////////////////////////////////////////////////
+
+//create a panel for adding the controls to stop drawing or preserve the AOI
+var donePanel = ui.Panel({widgets: [ui.Label(null),ui.Label(null)], layout: ui.Panel.Layout.flow('horizontal')});
+
+//a checkbox to hold over the AOI for new year selection without redrawing
+var preserveAOI = ui.Checkbox({label: 'Preserve AOI', disabled: true, style: {position: 'middle-right'}});
+
+//button to stop drawing and display the map and data
+var doneButton = ui.Button({label: 'Display ET', style: buttonStyleDict.set({color: '#dedede', position:'middle-left'}), onClick: function endDrawing(){drawer.stop();
+  if (preserveAOI.getDisabled() === true){
+  preserveAOI.setDisabled(false);
+  donePanel.remove(donePanel.widgets().get(2));}
+}, disabled: true});
+
+//remove dummy widgets and replace with the buttons from above (this is just an organization tool to help keep things straight for the developer)
+donePanel.widgets().set(0, doneButton);
+donePanel.widgets().set(1, preserveAOI);
+
+
+//create a panel to eventually hold the chart that gets generated
+var chartPanel = ui.Panel({
+  style: {height: '235px', width: '600px', position: 'bottom-right', shown: false}
+});
+//add the chart panel to the map
+Map.widgets().set(0, chartPanel);
+
+
+///////////////////////////////////////////////////////////////
+/////////////// MAIN FUNCTION OF THE APP //////////////////////
+///////////////////////////////////////////////////////////////
+
+//the function to make the ET and precip chart, and initialize drawing tools
+function makeNDVIchart() {
+  //if the chart is there then leave it, otherwise add a chart to the panel
+  ee.Algorithms.If(chartPanel.style().get('shown'), {}, chartPanel.style().set('shown', true));
+  
+  Map.widgets().get(3).clear();
+  Map.widgets().set(1, ui.Label({value: ' ', style: {color: '#00000000', backgroundColor: '#00000000', borderColor: '#00000000'}}));
+  Map.widgets().set(2, ui.Label({value: ' ', style: {color: '#00000000', backgroundColor: '#00000000', borderColor: '#00000000'}}));
+  
+  //if the User has checked the "preserve AOI" box, keep the original aoi 
+  if (preserveAOI.getValue() === true){
+    try {
+      Map.remove(Map.layers().get(4)); //remove the precip layer from the map to put a new one on later
+    } catch (error) {}
+    try {
+      Map.remove(Map.layers().get(3)); //remove the ET layer from the map to put a new one on later  
+    } catch (error) {}
+    var roi = ee.Feature(Map.layers().get(0).getEeObject()).geometry(); //set the roi to preserved geometry
+    try {
+      Map.remove(Map.layers().get(0)); //remove the drawn AOI if it still exists
+    } catch (error) {}
+  } else { //remove all of the layers and previous geometry to create a new AOI
+    Map.layers().reset();
+      //get the roi that the user draws and get it as an EE object gometry    
+    var roi = drawer.layers().get(0).getEeObject();
+  }
+
+  //remove the drawn layer from the map for better visualization
+  var drawnLayers = drawer.layers().get(0).geometries();
+  
+  for (var l = 0; l <  drawnLayers.length(); l+1){
+    drawer.layers().get(0).geometries().remove(drawer.layers().get(0).geometries().get(l));
+  }
+  
+  //calculate the area of the drawn shape
+  var area = ee.Number(ee.Geometry(roi).area(0.1, 'EPSG:8826').round());
+  
+  //calculate the center of the drawn geometry 
+  var center = ee.List(ee.Geometry(roi).centroid(0.1, 'EPSG:8826').coordinates());
+  Map.centerObject(roi);
+  
+  //create a square of 350 sqkm from the center of the drawn geometry incase the drawn geo is too large
+  var yMin = ee.Number(center.get(1)).subtract(9355);
+  var yMax = ee.Number(center.get(1)).add(9355);
+  var xMin = ee.Number(center.get(0)).subtract(9355);
+  var xMax = ee.Number(center.get(0)).add(9355);
+  
+  
+  //check that drawn geo is under 85000 acres, otherwise create a box that is of legal size
+  var polySize = 343982800;
+  var aoi = ee.Algorithms.If(area.gte(polySize), 
+    ee.Geometry.Rectangle({coords:[[xMin, yMin], [xMax, yMax]], proj: 'EPSG:8826', evenOdd: false}), 
+    roi);
+  
+  var polySizeCon = area.gt(polySize);
+    
+  //get a string to display depending on the size of the drawn geometry 
+  polySizeCon.evaluate(function(tooLarge){
+    if (tooLarge === 1){
+     //create a panel displaying the string gotten from the above if statement
+     var conPanel = ui.Label({value: "\u26A0 Drawn polygon is too large (limited to 85,000 acres). Displaying maximum image size.", 
+                             style: {position: 'bottom-left', backgroundColor: '#F2E92E', border: '1px', borderColor: 'black'}});
+     //add the panel to the Map
+     Map.widgets().set(1, conPanel);
+  }
+  });
+  
+  //function to find out how many pixels are within the drawn aoi, used to reject images with masked pixels in the aoi
+  var getValidPixels = function(img){
+    var redu = ee.Number(ee.Image(img).reduceRegion({
+      reducer: ee.Reducer.count(),
+      scale: 100,
+      geometry: aoi
+    }).values().get(1));
+    return img.set('PXcount', redu);
+  };
+  var addBand = function(img){
+    var band = ee.Image(1).rename('b2');
+    img = img.addBands(band);
+    var redu = ee.Image(img).reduceRegion({
+      reducer: ee.Reducer.count(),
+      scale: 30,
+      crs: 'EPSG:8826',
+      geometry: aoi
+    });
+    var tempCount = ee.Number(redu.values().get(1));
+    var origCount = ee.Number(redu.values().get(0));
+    var dif = origCount.divide(tempCount);
+    return img.set('countDif', dif).select('b1');
+  };
+    //create the ET image collection that is getting plotted
+  var imgCol =  et.filterBounds(aoi).filterDate(
+    startYearBox.getValue() + '-04-01', startYearBox.getValue() + '-11-01').map(addBand).filter(ee.Filter.gt('countDif', 0.50)); //at least half of the polygon has to have imagery to be usable
+
+  //create the prism collection with the same idea as the ET collection
+  var prismCol = prism.filterBounds(aoi).filterDate(
+    startYearBox.getValue() + '-04-01', startYearBox.getValue() + '-11-01').select(['ppt']);
+
+  //cast all ET images to integer format, and rename all ET bands to ET
+  imgCol = ee.ImageCollection(imgCol).map(
+      function(img){
+        return img.toInt().rename('ET');
+      });
+  
+  //rename the ppt band to Precip
+  prismCol = ee.ImageCollection(prismCol).map(
+    function(img){
+      return img.rename('Precip');
+    });
+  
+  //define start and end based off user selection
+  var start = ee.String(startYearBox.getValue());
+  var end = start;
+  //list of all years between start and end
+  var yearsOfInterest = ee.List.sequence(ee.Number.parse(start), 1);
+  
+  var allETfilt = ee.ImageCollection(et.filterDate(startYearBox.getValue()+'-01-01', startYearBox.getValue() + '-12-31').distinct('system:footprint')).map(function(img){return img.toByte().rename('b1')}).mosaic();
+  
+  //function to get the system time start for each image and add a human readable year into a list
+  function getDates(img, first){
+    var date = img.get('system:time_start');
+    var dateHuman = ee.Date(date).format('YYYY');
+    return ee.List(first).add(ee.Number.parse(dateHuman));
+  }
+  function setDates(img){ 
+    var date = img.get('system:time_start');
+    var dateHuman = ee.Date(date).format('YYYY');
+    return img.set('year', dateHuman);
+  }
+  
+  //make sure there are images in the list in case the user selects years with no imagery 
+  var sizeCon = imgCol.size().lt(1);
+  //if there are no images then move forward and back in time until there are images 
+  if (sizeCon.getInfo() === 1){
+    var first = ee.List([]); //set up first for iteration
+    var fullMETRIC = et.filterBounds(aoi);//.map(addBand).filter(ee.Filter.gt('countDif', 0.50)); //remove date filtering from the et collection
+    var allETDates = fullMETRIC.iterate(getDates, first); //get all of the dates in the collection
+    var distinctYears = ee.List(allETDates).distinct().sort();//get unique years
+    var earlier = distinctYears.filter(ee.Filter.lte('item', ee.Number.parse(startYearBox.getValue())));//get all of the years earlier than user start date
+    var later = distinctYears.filter(ee.Filter.gte('item', ee.Number.parse(startYearBox.getValue())));//get all of the years earlier than user end date
+    //if there are no later images then end the collection at the start date
+    end = ee.Algorithms.If(later.size().eq(0),
+      ee.String(earlier.get(earlier.size().subtract(1))),
+      ee.String(later.get(0))
+    );
+    //if there are no earlier images then start the collection at the end date
+    start = ee.Algorithms.If(earlier.size().eq(0),
+      ee.String(later.get(0)),
+      ee.String(earlier.get(earlier.size().subtract(1)))
+    );
+    var startDif = ee.Number.parse(startYearBox.getValue()).subtract(ee.Number.parse(start));
+    var endDif   = ee.Number.parse(end).subtract(ee.Number.parse(startYearBox.getValue()));
+    var sDstr = ee.String(startDif);
+    var eDstr = ee.String(endDif);
+    var d = ee.Dictionary([sDstr, start, eDstr, end]);
+    print('dict', d)
+    var smallestDif = startDif.min(endDif);
+    print('smallest dif', smallestDif)
+    var closest = ee.List(d.values([ee.String(smallestDif)])).get(0);
+    closest = ee.Algorithms.If(startDif.eq(endDif),
+                               start,
+                               closest);
+    print('second closest', closest)
+    start = ee.String(closest);
+    end = ee.String(closest);
+    
+    yearsOfInterest = ee.List.sequence(ee.Number.parse(start), ee.Number.parse(end), 1);//new years of interest
+    imgCol = et.filterBounds(aoi).filterDate( //new image collection
+      start.cat('-04-01'), end.cat('-11-01')).map(addBand).filter(ee.Filter.gt('countDif', 0.50)); //at least half of the polygon has to have imagery to be usable
+    if (imgCol.size().eq(0).getInfo() === 1){
+      var noImageryLabel = ui.Label({value: '\u26A0 No ET imagery available. Check that your AOI is within area of available imagery with the "Available ET Data" layer (Top-right corner of map).', style:
+      {whiteSpace: 'pre-wrap', position: 'top-left', backgroundColor: 'red', border: '1px', borderColor: 'black'}});
+      //add the warning label to the map
+      Map.widgets().set(2, noImageryLabel);
+      throw new Error('No Imagery Available in specified AOI');
+    }
+    
+    prismCol = prism.filterBounds(aoi).filterDate(start.cat('-04-01'), end.cat('-11-01')).select(['ppt']);
+    //add a warning letting the user know that there is no imagery for their years
+    var warningDatesLabel = ui.Label({value: ee.String('\u26A0 No ET imagery available for input year.\n Instead, data from the closest year (').cat(start).cat(') are displayed.').getInfo(), style:
+      {position: 'top-left', backgroundColor: '#F2E92E', border: '1px', borderColor: 'black'}});
+    
+    //add the warning label to the map
+    Map.widgets().set(2, warningDatesLabel);
+  }
+  end = end;
+  
+  first = ee.List([]);
+  
+  //create a couple of functions to get each image's year, and amount of water, set some variables for future math, and write dates into readable format
+  var getYear = function(img){
+    return img.set('year', img.date().get('year'));
+  };
+  var createCollection = function(col, variable){
+    var list = col.map(getYear).aggregate_array('year').distinct().map(function(y){
+      var year = ee.Number(y); //get a year for an image
+      return col.map(getYear)
+      .filter(ee.Filter.eq('year', year)) //get all images for one year
+      .map(function(img){return img.divide(25.4)}) //get mm into inches
+      .sum() //get the total growing season amount
+      .rename(ee.Number(year).format('%04d').cat('Cumm').cat(variable)) //name the band something useful
+      .set('year', year)
+      .set('length', img.bandNames().size())
+      .set('variable', variable) //set the desired variable
+      .set('system:time_start', ee.Date(ee.Number(year).format('%04d').cat('-04-01')).millis())
+      .set('system:time_end',   ee.Date(ee.Number(year).format('%04d').cat('-10-31')).millis());
+    });
+    return ee.ImageCollection(list);
+  };
+  //execute the above function
+  var newETCol = createCollection(imgCol, 'ET');
+  var newPrismCol = createCollection(prismCol, 'Precip');
+
+  //create a legend panel for ET and possible warning messages to live in
+  var legendPanel = ui.Panel({widgets: null,layout: 'absolute', style: {stretch: 'vertical', position: 'middle-right', backgroundColor: '#00000000', width: '220px', height: '300px'}});
+  
+  //get the date of the last year in the collection in case it different than what the user wanted
+  var actualYear = ee.Date(ee.Image(newETCol.toList(newETCol.size()).get(ee.Number(newETCol.size()).subtract(1))).get('system:time_start')).format('YYYY-MM-dd').slice(0,4);
+  //check if the user supplied and actual end year are different
+  var con = ee.Number.parse(actualYear).neq(ee.Number.parse(end)); 
+  //Map.widgets().remove(Map.widgets().get(3));
+  newETCol = newETCol.map(setDates);
+
+  var lis = ee.List([]);
+  var yearsET = newETCol.iterate(function(img, lis){
+    var y = ee.String(' ').cat(img.get('year'));
+    return ee.List(lis).add(y);
+  }, lis);
+
+  Map.widgets().set(3, ui.Panel({widgets: null,layout: 'absolute', style: {stretch: 'horizontal', position: 'middle-right', backgroundColor: '#00000000', width: '100px', height: '300px'}}));
+  //if the actual end year and user's end year are not the same the add a warning and display the most recent image in the time frame on the map
+  if (con.getInfo() === 1){
+    
+    legendPanel.add(ui.Label({value: '\u26A0  No available imagery for final year specified.\nMap shows imagery from the nearest available year.', style:{whiteSpace: 'pre-wrap', position: 'top-right',  padding: '5px', stretch: 'horizontal'}}));
+    //get the final image in the collection to add to the map later
+    var avgETImg = newETCol.filterDate(actualYear.cat('-04-01')).first();
+    var avgPrecipImg = newPrismCol.filterDate(actualYear.cat('-04-01')).first();
+  } else {
+    //get the final image in the collection to add to the map later
+    
+    avgETImg = newETCol.filterDate(end.cat('-04-01')).filter(ee.Filter.eq('variable', 'ET')).first();
+    avgPrecipImg = newPrismCol.filterDate(end.cat('-04-01')).filter(ee.Filter.eq('variable', 'Precip')).first();
+  }
+  //legendPanel.widgets().set(2, ui.Label({value: 'ET imagery is available in this study area for:' + yearsET.getInfo() + '.', style: {whiteSpace: 'pre-wrap', position: 'bottom-right', maxWidth: '300px', stretch: 'horizontal'}}));
+  //get a scale of the input images
+  var ETmapScale = ee.ImageCollection(imgCol).first().projection().nominalScale();
+  var PrecipMapScale = ee.Image(avgPrecipImg).projection().nominalScale();
+  
+  ////Make two legends
+
+  
+  ////ET Legend
+  //set the color ramp parameters
+  function setLegend(min, max, palette){
+    return{
+      bbox: [max,((max - min)/10),min,0],
+      dimensions: '100x10',
+      format: 'png',
+      min: min,
+      max: max,
+      palette: palette
+    };
+  }
+  
+  
+  //initialize the color bar as an image
+  var ETColorBar = ui.Thumbnail({
+    image: ee.Image.pixelLonLat().select(0),
+    params: setLegend(0, 50, ['#f5f5dc', '#d2b48c', '#40e0d0', '#7fff00', '#3fb100', '#006400', '#0000ff']),//['#f5f1dc', '#ede7ca',  '#d5b992', '#c8b791', '#afbf9d', '#8bcaad', '#44dfce', '#77fb1b', '#4bc000', '#218c00', '#036800', '#00512f', '#00269d', '#0020ae', '#0000ff']),
+    style: {stretch: 'horizontal', margin: '5px', maxHeight: '18px'}
+  });
+  
+  //create the list of labels 
+  var ETLegendLabels = ui.Panel({
+  widgets: [
+    ui.Label(0, {margin: '4px'}),
+    ui.Label(
+        '25',
+        {margin: '4px', textAlign: 'center', stretch: 'horizontal'}),
+    ui.Label(50, {margin: '4px'})
+  ],
+  layout: ui.Panel.Layout.flow('horizontal')
+  });
+  
+  //create the legend title
+  var ETLegendTitle = ui.Label({
+    //value: ee.String(actualYear).cat(' Cumulative ET (in)').getInfo(),
+    value: 'Cumulative ET (in)',
+    style: {fontWeight: 'bold'}
+  });
+  
+
+
+  
+  //create the legend panel, add all of the inputs from above, and display it
+  legendPanel.add(ui.Panel({widgets: [ETLegendTitle, ETColorBar, ETLegendLabels], layout: 'flow', 
+                            style: {stretch: 'horizontal', position: 'middle-right', width: '200px', height: '105px'}
+                                        }));
+
+  Map.widgets().set(3, legendPanel);
+  
+  //add the drawn geometry back to the map to visualize
+  Map.layers().set(0, ee.Geometry(aoi), {color: 'black', fillColor: null}, 'Area of Interest');
+  
+  ee.data.setWorkloadTag('etviewerdev-createlayers');
+
+  var toss = ee.List([]);
+  function createLayers(img, toss){
+    var name = img.getString('variable');
+    var year = img.getString('year');
+    var key = year.cat(' Cumulative ').cat(name);
+    var band = img.bandNames().get(0);
+    var value = ee.Image(img).toByte().clip(aoi);//.visualize({bands: [band], min: 0, max: 50, palette: ['#f5f5dc', '#d2b48c', '#40e0d0', '#7fff00', '#3fb100', '#006400', '#0000ff']});
+    value = value.set({'dispName': key, 'band': band, 'opacity': 1, 'min': 0, 'max': 50, 'palette': ['#f5f5dc', '#d2b48c', '#40e0d0', '#7fff00', '#3fb100', '#006400', '#0000ff']});
+    return  ee.List(toss).add(value);
+  }
+  var addition = allETfilt.set({'dispName': 'Available ET Data for ' + startYearBox.getValue(), 'band': allETfilt.bandNames().get(0), 'opacity': 0.3, 'min': 1, 'max': 1, 'palette': ['#0000ff']});//.visualize({palette: ['#0000ff'], opacity: 0.3}).set({'dispName': 'Available ET Data (Year Dependent)', 'opacity': 0.3, 'palette': ['#0000ff']});
+  var dict = ee.ImageCollection.fromImages(ee.List(newETCol.iterate(createLayers, toss)).add(addition));
+  
+  var empty = ee.List([]);
+  var getNames = ee.Dictionary(dict.iterate(function(img, empty){
+    var nam = img.getString('dispName');
+    var vis = ee.Dictionary({'dispName': img.getString('dispName'), 'band': img.getString('band'), 'opacity': img.getNumber('opacity'), 'min': img.getNumber('min'), 'max': img.getNumber('max'), 'palette': img.get('palette')});
+    return ee.List(empty).add(nam).add(vis);
+  }, empty));
+  var namesList = getNames.getInfo();
+
+  Map.setControlVisibility(false);
+  var num = Object.keys(namesList).length - 2;
+  
+  addLayerSelector(Map, num, 'top-right');
+  
+  // Adds a layer selection widget to the given map, to allow users to change
+  // which image is displayed in the associated map.
+  function addLayerSelector(mapToChange, defaultValue, position) {
+    ee.data.setWorkloadTag('etviewerdev-makelayerselector');
+    var label = ui.Label('Choose an image to visualize');
+
+    // This function changes the given map to show the selected image.
+    function updateMap(selection) {
+      ee.data.setWorkloadTag('etviewerdev-updatethemapwithlayers');
+      var img = dict.filter(ee.Filter.stringContains('dispName', selection)).first();
+      var item = namesList[selection];
+      mapToChange.layers().remove(mapToChange.layers().get(1));
+      mapToChange.addLayer(img, {bands: item['band'], min: item['min'], max: item['max'], palette: item['palette'], opacity: item['opacity']});
+      //mapToChange.layers().set(1, ui.Map.Layer(img).setVisParams({bands: item['band'], min: item['min'], max: item['max'],  opacity: item['opacity']}));
+    }  
+  
+    // Configure a selection dropdown to allow the user to choose between images,
+    // and set the map to update when a user makes a selection.
+    var select = ui.Select({items: Object.keys(namesList), onChange: updateMap, style: {borderStyle: 'solid', borderWidth: '2px', borderColor: 'lightgrey grey black darkgrey', borderRadius: '8px'}});
+    select.setValue(Object.keys(namesList)[defaultValue], true);
+    
+    var controlPanel =
+        ui.Panel({widgets: [label, select], style: {position: position, borderRadius: '10px', 
+        borderStyle: 'solid', borderWidth: '2px 3px 4px 2px', borderColor: '#c9c9c9 #b8b8b8 #bdbdbd #d6d6d6'
+        }});
+  
+    mapToChange.widgets().set(6, controlPanel);
+  }
+  
+  //get the precip and ET image collections into feature collections for plotting
+  function getTimeSeries(col, name){
+    ee.data.setWorkloadTag('etviewerdev-setupexports');
+    return col.map(function (img){
+      var meanStdRed = ee.Reducer.mean().combine({reducer2: ee.Reducer.stdDev(), sharedInputs: true});
+      var modeMinMaxRed = ee.Reducer.mode().combine({reducer2: ee.Reducer.minMax(), sharedInputs: true});
+      //get the mean of each image in the collection
+      var meanStd = img.reduceRegion({
+          reducer: meanStdRed,
+          geometry: ee.Geometry(aoi),
+          scale: 30,
+          crs: 'EPSG:8826'
+        });
+      var modeMinMax = img.reduceRegion({
+          reducer: modeMinMaxRed,
+          geometry: ee.Geometry(aoi),
+          scale: 30,
+          crs: 'EPSG:8826'
+        });
+      var mean = meanStd.get(meanStd.keys().filter(ee.Filter.stringEndsWith('item', 'mean')).get(0));
+      var std = meanStd.get(meanStd.keys().filter(ee.Filter.stringEndsWith('item', 'stdDev')).get(0));
+      var mode = modeMinMax.get(modeMinMax.keys().filter(ee.Filter.stringEndsWith('item', 'mode')).get(0));
+      var min = modeMinMax.get(modeMinMax.keys().filter(ee.Filter.stringEndsWith('item', 'min')).get(0));
+      var max = modeMinMax.get(modeMinMax.keys().filter(ee.Filter.stringEndsWith('item', 'max')).get(0));
+      var geom = ee.Geometry(aoi);
+
+      //create a Feature that contains the mean and any other desired statistics  
+      return ee.Feature(geom, {
+          'Mean Depth (in)': mean,
+          'Std Dev Depth (in)': std,
+          'Mode Depth (in)': mode,
+          'Min Depth (in)': min,
+          'Max Depth (in)': max,
+          'Polygon Area (acres)': area.divide(4046.86),
+          'Acre Feet': area.divide(4046.86).multiply(ee.Number(mean).divide(12)),
+          'date': img.date().format('YYYY'),
+          'dateLab': img.date().format('YYYY-MM-dd'),
+          'label': name,
+          'centerPoint': center,
+          'geometry': geom
+        });
+      });
+  }
+  //get ET into a feature collection
+  var ETseries = getTimeSeries(newETCol, 'ET');
+  //get precip into a feature collection
+  var PRISMseries = getTimeSeries(newPrismCol, 'Precip');
+  //combine ET and precip FeatureCollections into a single collection
+  var combo = ee.FeatureCollection(PRISMseries).merge(ee.FeatureCollection(ETseries)).set({'geometry': ee.Geometry(aoi)});
+  
+  ee.data.setWorkloadTag('etviewerdev-charting');
+  //create the chart to display on the map from the feature collection above
+  var chart = ui.Chart.feature.groups({
+  features: combo,
+  xProperty: 'date',
+  yProperty: 'Mean Depth (in)',
+  seriesProperty: 'label'
+  }).setDownloadable(1).setChartType('ColumnChart')
+  .setOptions({
+    title: 'Average Growing Season ET and Precip',
+    hAxis: {
+      gridlines: {count: 10}
+    },
+    vAxis: {title: 'in'},
+    lineWidth: 2,
+    pointSize: 4,
+    series: {
+      0: {name: 'Precip', color: '#2CA4F5'},
+      1: {name: 'ET', color: '#1A7327'}
+    }
+  });
+  //reset the chart panel after creation to make it up to date
+  chartPanel.widgets().reset([chart]);
+  
+  ee.data.setWorkloadTag('etviewerdev-makingexportpanel');
+  //create a panel that houses the outputs from the stuff above
+  var outputsPanel = ui.Panel({widgets: [ui.Label('Select the output file format:')], style:{border: '3px', borderColor: 'black', borderStyle: 'dashed'}});
+  outputsPanel.add(ui.Label('Select a format', {color: '#00000000'}));
+  //create a selection for the output format of the tabular data
+  var formatSelector = ui.Select({items: ['CSV', 'GeoJSON', 'KML', 'KMZ']//, 'TF_RECORD']
+                                  , placeholder: 'Output formats...', 
+                                  style: buttonStyleDict.set({color: 'black', position: 'top-left', stretch: 'vertical', width: ''}),
+                                  onChange: function output(){
+      var selectors = ['label', 'date', 'Mean Depth (in)', 'Std Dev Depth (in)', 'Mode Depth (in)', 'Min Depth (in)', 'Max Depth (in)', 
+                       'Polygon Area (acres)', 'Acre Feet', 'centerPoint', '.geo'];
+      //if (ee.String(formatSelector.getValue()).equals('TF_RECORD').getInfo()){
+      //selectors = ['label', 'date', 'Mean Depth (in)', 'Std Dev Depth (in)', 'Mode Depth (in)', 'Min Depth (in)', 'Max Depth (in)',  //commenting this out to remove TFRecord as an output option to save some up-time
+      //                 'Polygon Area (acres)', 'Acre Feet']}
+      var url =  ee.data.makeTableDownloadUrl(
+            ee.data.getTableDownloadId({table: combo,
+                                        format: formatSelector.getValue(),
+                                        selectors: selectors,
+                                        filename: start.cat('-').cat(end).cat(ee.String('_total_precip_and_et')).getInfo()
+          })
+      );
+      //create a button to download create table
+      var downloadButton = ui.Panel({widgets: [ui.Label('Click here to Download ' + formatSelector.getValue()+ '\n of ET and Precipitation Data', {position: 'top-center', whiteSpace: 'pre'}).setUrl(
+                                              url)]});
+      outputsPanel.widgets().set(1, downloadButton);
+    },
+  });
+  outputsPanel.add(formatSelector);
+
+  sidePanel.widgets().set(3, outputsPanel);
+
+  
+  //end drawing mode
+  drawer.stop();
+}
+
+///////////////////// EXECUTE THE MAIN FUNCTION //////////////////////
+
+//set a timer to prevent double editing of the chart for 500 milliseconds
+doneButton.onClick(ui.util.debounce(makeNDVIchart, 500));
+
+
+///////////////////////////////////////////////////////////////
+///////////// CONTROLS CREATION AND DISPLAY ///////////////////
+///////////////////////////////////////////////////////////////
+ee.data.setWorkloadTag('etviewerdev-createcontrols');
+var drawingButtonWidth = '250px';
+//The list of years that can be selected by the user
+//var years = ee.List.sequence(ee.Number(1985).int(), ee.Number(ee.Date(Date.now()).get('year')).int(), 1).map(function(i){return ee.Number(i).format('%04d')});
+
+//make a javascript array using the client side to avoid a getInfo
+var years = {};
+for (var i = 1985; i < new Date().getFullYear() + 1; i++){
+  years[i] = i
+}
+
+//convert the years to an active list
+var yearsActiveList = years;
+
+//The box to select the final analysis year. First value determined by selection of start year to prevent end date < start date
+//Create a selection box for the initial year (we allow any number of years to be selected)
+var startYearBox = ui.Select({items: Object.keys(years),
+                              placeholder: 'Select year...', style:buttonStyleDict.set({color: 'black', width: drawingButtonWidth, stretch: 'horizontal'})
+                              });
+                              
+
+
+//create a panel with the boxes for dates and their appropriate labeling, and add instructions
+var dates = ui.Panel({
+  widgets: [ui.Label('1. Select desired year from\ndropdown selector.', {whiteSpace: 'pre'}),
+  startYearBox
+  ],
+  style: {position: 'bottom-left'},
+  layout: null
+});
+
+//create a control panel with instructions for the user 
+var controls = ui.Panel({
+  widgets: [
+  dates,
+  ui.Label('  ', {width: '300px', padding: '0px', height: '5px', color: '#00000000'}),
+  ui.Label('2. Draw a polygon over your area of interest.\n    Area limited to 85,000 acres.\n    Double click to close polygon.', {whiteSpace: 'pre-wrap'}),
+  ui.Button({
+    label: symbol.polygon + ' Draw Polygon',
+    onClick: drawPoly,
+    style: buttonStyleDict.set({color: 'black', width: '', position: 'middle-left'})
+  }),
+  ui.Label(' ', {width: '300px',padding: '0px', height: '5px', color: '#00000000'}),
+  ui.Label('3. Press "Display ET" to view imagery. \n    Check "Preserve AOI" to change the year of interest but keep your polygon.', {width: '275px', whiteSpace: 'pre-wrap'}),
+  donePanel,
+  ui.Label(' ', {width: '300px', padding: '0px', height: '5px', color: '#00000000'}),
+  ui.Label('4. Download your data, or repeat steps 1-3 to edit/move geometry for a new chart.',
+  {whiteSpace: 'pre-wrap', width: '275px'})
+  ],
+  style: {position: 'bottom-center', stretch: 'horizontal'}
+}).setLayout(ui.Panel.Layout.flow('horizontal', true));
+
+//This is a callback to a function at the top of the script for preserving the AOI to change the dates without redrawing
+var disableDrawer = ee.Algorithms.If(preserveAOI.getValue() === true,
+true,
+false);
+
+preserveAOI.onChange(function disable(){
+  controls.widgets().get(3).setDisabled(!controls.widgets().get(3).getDisabled());
+  if (controls.widgets().get(3).getDisabled() === true){
+    controls.widgets().get(3).style().set({color: '#DEDEDE'});
+  }
+  if (controls.widgets().get(3).getDisabled() === false){
+    controls.widgets().get(3).style().set({color: 'black'});
+  }
+});
+
+
+//remove the map controls from the display, but they still exist?
+Map.setControlVisibility(0, 1); 
+
+
+
+///////////////////////////////////////////////////////////////
+///////////////// USER HELP SECTION ///////////////////////////
+///////////////////////////////////////////////////////////////
+
+//callable sizes and colors
+var titlePanelWidth = '330px';
+var titlePanelHeight = '175px';
+var titleLabelsWidth = '300px';
+var howToExpandedWidth = '620px';
+var aboutExpandedWidth = '620px';
+var howToUnexpandedWidth = '330px';
+var aboutUnexpandedWidth = '330px';
+var aboutAndHelpButtonWidth = '100px';
+
+//panel to hold the title and instruction/background buttons
+var titlePanel = ui.Panel({style:
+  {position: 'top-left', width: titlePanelWidth, height: titlePanelHeight, backgroundColor: 'white'},
+  layout: 'absolute'
+});
+var titleLabel = ui.Label('IDWR ET Viewer',
+  {fontSize: '26px', backgroundColor: 'white', margin: '0px', textDecoration: 'underline',
+  textAlign: 'left', padding: '0px', position: 'top-left', width: '280px'});
+  
+var subTitleLabel = ui.Label('Monitoring evapotranspiration over time for most of Southern Idaho',
+  {fontSize: '11px', backgroundColor: 'white', fontStyle: 'italic',  margin: '0px',
+  textAlign: 'left', padding: '0px', position: 'top-left', width: '280px'});
+  
+var  titlePhrasingPanel = ui.Panel({style:
+  {position: 'top-left', padding: '0px', width: titleLabelsWidth, height: '150px', backgroundColor: 'white'},
+  layout: 'flow'
+});
+
+//clickable elements that describe some of the background of the app
+var aboutElements = ui.Panel({layout: 'flow',
+    style: {shown: false, width: aboutUnexpandedWidth, border: 'black 3px solid', padding: '3px'}});
+var aboutButton = ui.Button({label: 'About this App ❯', 
+                            style: buttonStyleDict.set({color: 'black', position: 'bottom-left', width: ''})});
+var aboutText = ui.Label('The Evapotranspiration (ET) Viewer app was developed by the IDWR Geospatial Technology Section' +
+ ' to help users determine consumptive use for a desired region.\n \nThe app summarizes April through October IDWR METRIC evapotranspiration (ET)' +
+ ' and GridMET precipitation for the user selected year and user drawn polygons.\n' +
+ '\nET data is not available for every year or at all locations, but the image layer titled "Available ET Data" shows where ET data exist for at least 1 year.\n' +
+ '\nDisclaimer:\n' + 
+'The Idaho Department of Water Resources (IDWR) is maintaining this website as a public service. IDWR strives to ensure that all technical data and other information made available to the public through this website is accurate, complete, and in conformance with the Idaho Public Records Act.' +
+' Neither IDWR nor the State of Idaho, however, assumes any legal responsibility for the accuracy or completeness of the information contained on this website. Persons using information from this website for official purposes, or other purposes, for which accuracy and completeness are required, are hereby notified that they should first verify the information with the public records or other primary sources from which the information was obtained.\n' +
+'\nContact:\n' + 
+'For questions about this map or the GIS data, please email GISinfo@idwr.idaho.gov.', 
+ {whiteSpace: 'pre-wrap', position: 'top-left'});
+
+//clickable elements to describe how to use the app
+var howToElements = ui.Panel({layout: 'flow',
+    style: {position: 'top-left', shown: false, margin: '10px 0px 10px -8px', width: howToUnexpandedWidth, border: 'black solid 3px', padding: '0px'}});
+var howToButton = ui.Button({label: 'How do I... ❯', 
+                            style: buttonStyleDict.set({color: 'black', position: 'bottom-center', width: ''})});
+
+var howButton1 = ui.Button({label: '...view ET for an area? ', style: buttonStyleDict.set({color: 'black', stretch: 'vertical', width: ''})});
+var howButton2 = ui.Button({label: '...input my own shapefile? ', style: buttonStyleDict.set({color: 'black', stretch: 'vertical', width: ''})});
+var howButton3 = ui.Button({label: '...download ET data? ', style: buttonStyleDict.set({color: 'black', stretch: 'vertical', width: ''})});
+
+var butList = ui.data.ActiveList([howButton1, howButton2, howButton3]);//, howButton4, howButton5]);
+
+var howLabel1 = ui.Label({value: 'The panel on the left will direct you through the app.\n' +
+'\nFirst, select the years you want to analyze.\n' + 
+'\nNext, select the "Draw Polygon" button. You can then click on the map and create your shape. Shapes are currently limited to 85,000 acres. Double click on a point to finish drawing your polygon. When you ' +
+'are finished, click the "Display ET" button.\n \nA chart will display the mean growing season (April through October) precipitation (in inches), the mean growing season ET (in inches), ' + 
+' and the area of the drawn polygon in acres.\n \nData are available for download immediately after chart generation is complete.\n', style: {whiteSpace: 'pre-wrap', stretch: 'both'}});
+var howLabel2 = ui.Label({value: 'Because of the data hosting abilities of Google Earth Engine, you currently can not ' + 
+'upload your own shapefile to this app.', style: {whiteSpace: 'pre-wrap', stretch: 'both'}});
+var howLabel3 = ui.Label({value: 'After you create a polygon from the tools in the left side panel, a drop-down selector for your preferred file type ' + 
+'will appear in the side panel.\n \nSelect a file type and click the generated  hyperlink to immediately download ET and precipitation data. \n' + 
+'\nDownloaded data include: \nMean growing season (April to October) precipitation in inches, \nMean growing season ET in inches, \nArea of the drawn polygon in acres, ' +
+'\nAcre-feet of evapotranspiration within the drawn polygon, \nand the center point coordinates of the drawn polygon.\n \nFor geospatial file formats (geojson, KML, and KMZ files), the polygon geometry is included.', style: {whiteSpace: 'pre-wrap', stretch: 'both'}});
+
+var labList = ui.data.ActiveList([howLabel1, howLabel2, howLabel3]);//, howLabel4, howLabel5]);
+
+//add the parent items to the title panel
+titlePhrasingPanel.add(titleLabel);
+titlePhrasingPanel.add(subTitleLabel);
+titlePanel.add(titlePhrasingPanel);
+titlePanel.add(aboutButton);
+titlePanel.add(howToButton);
+
+aboutElements.add(aboutText);
+howToElements.style().set('position', 'top-left');
+howToElements.add(howButton1).add(howButton2).add(howButton3);
+
+Map.widgets().set(4, aboutElements);
+
+//function to show the elements describing app background
+var aboutShow = false;
+function aboutButtonHandler() {
+  if(aboutShow) {
+    aboutShow = false;
+    aboutElements.style().set('shown', false);
+    aboutButton.setLabel('About this app ❯');
+  } else {
+    aboutShow = true;
+    aboutElements.style().set('shown', true);
+    aboutButton.setLabel('About this app ❮');
+  }
+  
+  if(aboutShow) {
+    titlePanel.style().set('width', titlePanelWidth);
+    aboutElements.style().set({position: 'top-left', width: aboutExpandedWidth});
+  } else {
+    titlePanel.style().set('width', titlePanelWidth);
+  }
+  if (howToElements.style().get('shown') === true){
+    howToElements.style().set('shown', false);
+    howToButton.setLabel('How do I... ❯');
+  } 
+}
+
+//function to show the how to buttons (warning; its a mess currently!!!)
+var howToShow = false;
+function howToButtonHandler() {
+  if(!howToElements.style().get('shown')){   //if the elements box is NOT showing
+    howToElements.style().set('position', 'top-left');
+    howToElements.style().set('shown', true); //set the element box to show
+    howToButton.setLabel('How do I... ❮'); //change the button label direction
+    howToElements.style().set('position', 'top-left'); //put the elements in the top-right corner
+    howToButton.style().set('position', 'bottom-center'); //move the button to the center
+    aboutElements.style().set('shown', false);
+    aboutButton.setLabel('About this app ❯');
+    howToButton.onClick(function close(){ //change the on click function to:
+      howToButton.style().set('position', 'bottom-center'); //move the button back to the right
+      howToButton.setLabel('How do I... ❯'); //reset the button label
+      howToElements.style().set('shown', false); //hide the elements 
+      howToElements.style().set('position', 'top-left');
+      howToButton.onClick(howToButtonHandler);
+    });
+  } else {
+    howToElements.style().set('position', 'top-left');
+    howToElements.style().set('shown', false);
+    titlePanel.style().set('width', titlePanelWidth);
+    titlePanel.style().set('height', titlePanelHeight);
+    howToButton.style().set('position', 'bottom-center');
+    howToButton.setLabel('How do I... ❯');
+    howToButton.onClick(howToButtonHandler);
+  }
+}
+
+//apply the above two functions to clickable buttons
+aboutButton.onClick(aboutButtonHandler);
+howToButton.onClick(howToButtonHandler);
+
+//this is the function to show the nested help buttons when clicked
+function nestedButton(num) {
+  function dispHelp(){
+    var lab = labList.get(num);
+    var but = butList.get(num);
+    var dispLabel = but.getLabel();
+    
+    lab.style().set('shown', false);
+    but.setLabel(dispLabel);
+      lab.style().set('shown', true);
+      howToElements.style().set('position', 'top-left');
+      howToElements.style().set('width', howToExpandedWidth);
+      howToElements.clear();
+      but.style().set('position', 'bottom-left');
+      howToElements.add(but);
+      howToElements.add(lab);
+      
+      howToElements.add(ui.Button({label: 'Close', style: buttonStyleDict.set({color: 'black', stretch: 'vertical', width: '', position: 'top-right'}), onClick: function closeBox(){
+        howToElements.clear();
+        howToElements.style().set('position', 'top-left');
+        howToElements.style().set('width', howToUnexpandedWidth);
+        howToElements.add(howButton1).add(howButton2).add(howButton3);//.add(howButton4).add(howButton5);
+      }}));
+  }
+  return dispHelp;
+}
+
+//apply the above function
+howButton1.onClick(nestedButton(0));
+howButton2.onClick(nestedButton(1));
+howButton3.onClick(nestedButton(2));
+
+//add everything to its respective location on the screen
+
+//sidePanel.widgets().set(0, logoThumb);
+sidePanel.widgets().set(1, titlePanel);
+Map.widgets().set(5, howToElements);
+sidePanel.widgets().set(2, controls);
